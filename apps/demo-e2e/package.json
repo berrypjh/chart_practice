@@ -1,0 +1,10 @@
+{
+  "name": "@berry-chart-test-lib/demo-e2e",
+  "version": "0.0.1",
+  "private": true,
+  "nx": {
+    "implicitDependencies": [
+      "@berry-chart-test-lib/demo"
+    ]
+  }
+}
