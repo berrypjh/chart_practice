@@ -2,6 +2,9 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "./out-tsc/vitest",
+    "composite": false,
+    "declarationMap": false,
+    "emitDeclarationOnly": false,
     "module": "esnext",
     "moduleResolution": "bundler",
     "types": [
