@@ -17,7 +17,7 @@
     "affected:lint": "nx affected -t lint",
     "reset": "nx reset",
     "storybook": "nx storybook @my-chart/react",
-    "graph": "nx graph",
+    "graph": "nx graph --exclude @my-chart-lib/source",
     "release": "nx release",
     "release:dry-run": "nx release --dry-run",
     "format": "nx format:write",
@@ -28,8 +28,8 @@
     "build:libs:chart-react-native": "nx build @my-chart/react-native",
     "build:apps:demo-web": "nx build @my-chart/demo-web",
     "build:apps:demo-mobile": "nx build @my-chart/demo-mobile",
-    "ai:commit": "tsx tools/scripts/ai-commit-msg.mts",
-    "ai:ui": "tsx tools/scripts/ai-ui-scaffold.mts"
+    "ai:commit": "tsx tools/scripts/ai/ai-commit-msg.mts",
+    "ai:ui": "tsx tools/scripts/ai/ai-ui-scaffold.mts"
   },
   "private": true,
   "devDependencies": {

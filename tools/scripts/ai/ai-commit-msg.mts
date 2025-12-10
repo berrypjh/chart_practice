@@ -1,62 +1,80 @@
-import dotenv from 'dotenv';
-import OpenAI from 'openai';
 import { spawnSync, execSync } from 'node:child_process';
 import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import { createOpenAIClient, getOpenAIModel } from './openai-client.mts';
 
 type CommitMessage = {
   title: string;
   body: string;
 };
 
-const root = import.meta.dirname;
+const client = createOpenAIClient('ai-commit');
+const model = getOpenAIModel();
 
-dotenv.config({
-  path: path.resolve(root, '../../.env'),
-  override: true,
-});
+type FileStatus = {
+  status: string;
+  file: string;
+  oldFile?: string;
+};
 
-const apiKey = process.env.OPENAI_API_KEY;
-const model = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
-
-if (!apiKey) {
-  console.error('[ai-commit] OPENAI_API_KEY가 설정되지 않았습니다. 루트 .env를 확인하세요.');
-  process.exit(1);
-}
-
-const client = new OpenAI({ apiKey });
-
-const getStagedFiles = (): string[] => {
+const getStagedFilesWithStatus = (): FileStatus[] => {
   let output = '';
   try {
-    output = execSync('git diff --cached --name-only', { encoding: 'utf8' });
-  } catch (e) {
-    console.error('[ai-commit] git diff --cached --name-only 실행에 실패했습니다.');
+    output = execSync('git diff --cached --name-status --find-renames', { encoding: 'utf8' });
+  } catch {
+    console.error(
+      '[ai-commit] git diff --cached --name-status --find-renames 실행에 실패했습니다.',
+    );
     process.exit(1);
   }
 
-  const files = output
+  const lines = output
     .split(/\r?\n/)
-    .map((f) => f.trim())
+    .map((l) => l.trim())
     .filter(Boolean);
 
-  if (files.length === 0) {
+  if (lines.length === 0) {
     console.error(
       '[ai-commit] 스테이징된 변경 파일을 찾을 수 없습니다. 먼저 `git add`로 변경을 올려주세요.',
     );
     process.exit(1);
   }
 
+  const files: FileStatus[] = [];
+  for (const line of lines) {
+    const parts = line.split('\t');
+    if (parts.length >= 2) {
+      const statusCode = parts[0].trim();
+      const status = statusCode.replace(/\d+$/, ''); // R100 -> R, C100 -> C
+
+      if (status === 'R' || status === 'C') {
+        if (parts.length >= 3) {
+          files.push({
+            status,
+            oldFile: parts[1].trim(),
+            file: parts[2].trim(),
+          });
+        }
+      } else {
+        files.push({
+          status,
+          file: parts[1].trim(),
+        });
+      }
+    }
+  }
+
   return files;
 };
 
-const groupFilesByScope = (files: string[]): Record<string, string[]> => {
-  const groups: Record<string, string[]> = {};
+const groupFilesByScope = (files: FileStatus[]): Record<string, FileStatus[]> => {
+  const groups: Record<string, FileStatus[]> = {};
 
-  for (const file of files) {
+  for (const fileStatus of files) {
+    const file = fileStatus.file;
     const [first, second] = file.split('/');
 
     let scope = 'root';
@@ -67,16 +85,27 @@ const groupFilesByScope = (files: string[]): Record<string, string[]> => {
     if (!groups[scope]) {
       groups[scope] = [];
     }
-    groups[scope].push(file);
+    groups[scope].push(fileStatus);
   }
 
   return groups;
 };
 
-const getScopedDiff = (files: string[]): string => {
-  const result = spawnSync('git', ['diff', '--cached', '--', ...files], {
-    encoding: 'utf8',
-  });
+const getScopedDiff = (files: FileStatus[]): string => {
+  const filePaths = files.map((f) => f.file);
+  const oldFilePaths = files
+    .filter((f): f is FileStatus & { oldFile: string } => f.oldFile !== undefined)
+    .map((f) => f.oldFile);
+  const allPaths = [...new Set([...filePaths, ...oldFilePaths])];
+
+  // --find-renames로 파일 이동 추적, --find-copies로 복사 추적
+  const result = spawnSync(
+    'git',
+    ['diff', '--cached', '--find-renames', '--find-copies', '--', ...allPaths],
+    {
+      encoding: 'utf8',
+    },
+  );
 
   if (result.status !== 0) {
     console.error('[ai-commit] git diff --cached -- <files> 실행에 실패했습니다.');
@@ -96,7 +125,7 @@ const getScopedDiff = (files: string[]): string => {
 const generateCommitMessageForScope = async (
   scope: string,
   diff: string,
-  scopedFiles: string[],
+  scopedFiles: FileStatus[],
 ): Promise<CommitMessage> => {
   console.log(`[ai-commit] scope "${scope}" 에 대한 커밋 제목과 상세 설명을 생성 중입니다...\n`);
 
@@ -114,6 +143,7 @@ const generateCommitMessageForScope = async (
     '- body: 커밋 상세 설명 (최대 3줄까지 가능).',
     '  - 무엇을, 왜, 어떻게 변경했는지 한국어로 간단하고 명확하게.',
     '  - 불릿 리스트(-)나 짧은 문장 최대 3줄로 요약해서 작성해도 좋음.',
+    '  - 파일 이동(rename)이나 공통화(refactor) 작업이 있다면 반드시 언급해.',
     '',
     '반드시 아래 JSON 형식으로만 출력해:',
     '{',
@@ -124,7 +154,23 @@ const generateCommitMessageForScope = async (
     '추가 텍스트 없이 JSON만 반환해.',
   ].join('\n');
 
-  const filesList = scopedFiles.map((f) => `- ${f}`).join('\n');
+  // 파일 상태 정보를 포함한 파일 목록 생성
+  const filesList = scopedFiles
+    .map((f) => {
+      const statusLabel: Record<string, string> = {
+        A: '추가',
+        M: '수정',
+        D: '삭제',
+        R: '이름변경',
+        C: '복사',
+      };
+      const label = statusLabel[f.status] || f.status;
+      if (f.oldFile) {
+        return `- ${label}: ${f.oldFile} → ${f.file}`;
+      }
+      return `- ${label}: ${f.file}`;
+    })
+    .join('\n');
 
   const response = await client.responses.create({
     model,
@@ -135,7 +181,7 @@ const generateCommitMessageForScope = async (
         content: [
           `scope "${scope}" 에 해당하는 변경에 대해 한국어로 커밋 제목과 상세 설명을 만들어줘.`,
           '',
-          '변경된 파일 목록:',
+          '변경된 파일 목록 (상태 포함):',
           filesList,
           '',
           'Git diff:',
@@ -158,7 +204,7 @@ const generateCommitMessageForScope = async (
     const parsed = JSON.parse(raw) as { title?: string; body?: string };
     title = (parsed.title ?? '').trim();
     body = (parsed.body ?? '').trim();
-  } catch (e) {
+  } catch {
     // JSON 파싱 실패 시: 첫 줄을 제목, 나머지를 본문으로 간주
     const lines = raw.split(/\r?\n/);
     title = (lines[0] ?? '').trim();
@@ -259,7 +305,7 @@ const askUserForDecision = async (
   return message;
 };
 
-const runGitCommitForScope = (scope: string, message: CommitMessage, files: string[]) => {
+const runGitCommitForScope = (scope: string, message: CommitMessage, files: FileStatus[]) => {
   const args = ['commit', '-m', message.title];
 
   if (message.body && message.body.trim().length > 0) {
@@ -268,7 +314,13 @@ const runGitCommitForScope = (scope: string, message: CommitMessage, files: stri
   }
 
   // 해당 scope에 속한 파일들만 커밋
-  args.push('--', ...files);
+  const filePaths = files.map((f) => f.file);
+  const oldFilePaths = files
+    .filter((f): f is FileStatus & { oldFile: string } => f.oldFile !== undefined)
+    .map((f) => f.oldFile);
+  const allPaths = [...new Set([...filePaths, ...oldFilePaths])];
+
+  args.push('--', ...allPaths);
 
   console.log(`\n[ai-commit] scope "${scope}" 에 대해 git ${args.join(' ')} 실행 중...\n`);
 
@@ -283,7 +335,7 @@ const runGitCommitForScope = (scope: string, message: CommitMessage, files: stri
 };
 
 const main = async () => {
-  const stagedFiles = getStagedFiles();
+  const stagedFiles = getStagedFilesWithStatus();
   const grouped = groupFilesByScope(stagedFiles);
 
   // scope 순서: root가 있으면 먼저, 그 다음은 알파벳 순
