@@ -113,7 +113,19 @@
     "version": {
       "preVersionCommand": "pnpm dlx nx run-many -t build --projects libs/*"
     },
-    "projectsRelationship": "independent"
+    "projectsRelationship": "independent",
+    "changelog": {
+      "workspaceChangelog": {
+        "renderOptions": {
+          "authors": false,
+          "mapAuthorsToGitHubUsernames": false,
+          "versionTitleDate": true,
+          "commitReferences": true
+        },
+        "createRelease": "github"
+      },
+      "projectChangelogs": true
+    }
   },
   "targetDefaults": {
     "build": {
